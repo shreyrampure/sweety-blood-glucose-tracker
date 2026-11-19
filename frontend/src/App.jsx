@@ -2,14 +2,17 @@
 import { useEffect, useState } from 'react';
 import './App.css';
 
-const API = 'http://localhost:5000';
+const API = '/api';
+const slots = [
+  { value: 'morning', label: 'Morning (Fasting)' },
+  { value: 'after_breakfast', label: 'After Breakfast' },
+  { value: 'after_lunch', label: 'After Lunch' },
+  { value: 'after_dinner', label: 'After Dinner' }
+];
 
 function getToday() {
   const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
 function getCurrentMonth() {
@@ -21,10 +24,7 @@ function getCurrentMonth() {
 }
 
 function App() {
-  const [token, setToken] = useState(
-    localStorage.getItem('sweetyToken') || ''
-  );
-
+  const [token, setToken] = useState(localStorage.getItem('sweetyToken') || '');
   const [user, setUser] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem('sweetyUser')) || null;
@@ -39,14 +39,17 @@ function App() {
   const [password, setPassword] = useState('');
 
   const [glucose, setGlucose] = useState('');
+  const [slot, setSlot] = useState('morning');
   const [measuredAt, setMeasuredAt] = useState('');
-  const [readings, setReadings] = useState([]);
+  const [editingId, setEditingId] = useState(null);
 
+  const [readings, setReadings] = useState([]);
   const [dailyDate, setDailyDate] = useState(getToday());
   const [dailyReport, setDailyReport] = useState(null);
-
   const [month, setMonth] = useState(getCurrentMonth());
   const [monthlyReport, setMonthlyReport] = useState(null);
+  const [rangeReport, setRangeReport] = useState(null);
+  const [previousReport, setPreviousReport] = useState(null);
 
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
@@ -77,20 +80,19 @@ function App() {
 
     try {
       const endpoint = mode === 'register' ? '/register' : '/login';
-
       const body = mode === 'register'
         ? { name, email, password }
         : { email, password };
 
-      const data = await fetch(`${API}${endpoint}`, {
+      const response = await fetch(`${API}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
 
-      const result = await data.json();
+      const result = await response.json();
 
-      if (!data.ok) {
+      if (!response.ok) {
         throw new Error(result.message || 'Authentication failed');
       }
 
@@ -101,7 +103,6 @@ function App() {
       setUser(result.user);
       setPassword('');
       setMessage('Welcome to Sweety!');
-
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -117,8 +118,18 @@ function App() {
     setReadings([]);
     setDailyReport(null);
     setMonthlyReport(null);
+    setRangeReport(null);
+    setPreviousReport(null);
     setMessage('');
     setMode('login');
+    clearForm();
+  }
+
+  function clearForm() {
+    setGlucose('');
+    setSlot('morning');
+    setMeasuredAt('');
+    setEditingId(null);
   }
 
   async function loadReadings() {
@@ -130,33 +141,79 @@ function App() {
     }
   }
 
-  async function addReading(event) {
+  async function saveReading(event) {
     event.preventDefault();
     setMessage('');
+
+    const value = Number(glucose);
+
+    if (!Number.isInteger(value) || value < 40 || value > 600) {
+      setMessage('Enter a whole number between 40 and 600.');
+      return;
+    }
+
     setLoading(true);
 
     try {
       const body = {
-        glucose_level: Number(glucose),
+        glucose_level: value,
+        slot,
         ...(measuredAt
           ? { measured_at: new Date(measuredAt).toISOString() }
           : {})
       };
 
-      const data = await apiRequest('/readings', {
-        method: 'POST',
-        body: JSON.stringify(body)
-      });
+      const data = await apiRequest(
+        editingId ? `/readings/${editingId}` : '/readings',
+        {
+          method: editingId ? 'PUT' : 'POST',
+          body: JSON.stringify(body)
+        }
+      );
 
-      setMessage(data.message || 'Reading saved successfully');
-      setGlucose('');
-      setMeasuredAt('');
+      setMessage(data.message || (editingId
+        ? 'Reading updated successfully'
+        : 'Reading saved successfully'));
+
+      clearForm();
       await loadReadings();
-
     } catch (error) {
       setMessage(error.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  function editReading(reading) {
+    setEditingId(reading.id);
+    setGlucose(String(reading.glucose_level));
+    setSlot(reading.slot || 'morning');
+
+    const date = new Date(reading.measured_at);
+    const localDate = new Date(
+      date.getTime() - date.getTimezoneOffset() * 60000
+    );
+
+    setMeasuredAt(localDate.toISOString().slice(0, 16));
+    setMessage('Editing reading. Make your changes and save.');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function deleteReading(id) {
+    if (!window.confirm('Are you sure you want to delete this reading?')) {
+      return;
+    }
+
+    try {
+      const data = await apiRequest(`/readings/${id}`, {
+        method: 'DELETE'
+      });
+
+      setMessage(data.message || 'Reading deleted successfully');
+      if (editingId === id) clearForm();
+      await loadReadings();
+    } catch (error) {
+      setMessage(error.message);
     }
   }
 
@@ -188,11 +245,46 @@ function App() {
     }
   }
 
-  useEffect(() => {
-    if (token) {
-      loadReadings();
+  async function getMonthToDate() {
+    try {
+      const data = await apiRequest(
+        `/reports/month-to-date?date=${getToday()}`
+      );
+      setRangeReport(data);
+      setMessage('');
+    } catch (error) {
+      setMessage(error.message);
     }
+  }
+
+  async function getPreviousMonth() {
+    try {
+      const data = await apiRequest('/reports/previous-month');
+      setPreviousReport(data);
+      setMessage('');
+    } catch (error) {
+      setMessage(error.message);
+    }
+  }
+
+  useEffect(() => {
+    if (token && user) loadReadings();
   }, [token]);
+
+  function ReportSummary({ report }) {
+    if (!report) return null;
+
+    const summary = report.report || {};
+
+    return (
+      <div className="report-result">
+        <p>Total readings: <strong>{summary.total_readings ?? 0}</strong></p>
+        <p>Average: <strong>{summary.average_glucose ?? 'N/A'}</strong></p>
+        <p>Highest: <strong>{summary.highest_glucose ?? 'N/A'}</strong></p>
+        <p>Lowest: <strong>{summary.lowest_glucose ?? 'N/A'}</strong></p>
+      </div>
+    );
+  }
 
   if (!token || !user) {
     return (
@@ -233,11 +325,7 @@ function App() {
             />
 
             <button type="submit" disabled={loading}>
-              {loading
-                ? 'Please wait...'
-                : mode === 'login'
-                  ? 'Login'
-                  : 'Register'}
+              {loading ? 'Please wait...' : mode === 'login' ? 'Login' : 'Register'}
             </button>
           </form>
 
@@ -273,9 +361,7 @@ function App() {
             <small>Blood Glucose Tracker</small>
           </div>
         </div>
-        <button className="logout-button" onClick={logout}>
-          Logout
-        </button>
+        <button className="logout-button" onClick={logout}>Logout</button>
       </header>
 
       <main className="dashboard">
@@ -296,24 +382,38 @@ function App() {
 
         <section className="dashboard-grid">
           <div className="panel">
-            <h3>➕ Add Glucose Reading</h3>
+            <h3>{editingId ? '✏️ Edit Reading' : '➕ Add Glucose Reading'}</h3>
             <p className="panel-description">
-              You can save up to 4 readings per day.
+              Four readings per day, one for each time slot.
             </p>
 
-            <form onSubmit={addReading}>
+            <form onSubmit={saveReading}>
               <label>Glucose level (mg/dL)</label>
               <input
                 type="number"
-                min="0.01"
-                step="0.01"
+                min="40"
+                max="600"
+                step="1"
                 placeholder="Example: 120"
                 value={glucose}
                 onChange={(e) => setGlucose(e.target.value)}
                 required
               />
 
-              <label>Measurement date and time (optional)</label>
+              <label>Reading slot</label>
+              <select
+                value={slot}
+                onChange={(e) => setSlot(e.target.value)}
+                required
+              >
+                {slots.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+
+              <label>Measurement date and time</label>
               <input
                 type="datetime-local"
                 value={measuredAt}
@@ -321,8 +421,18 @@ function App() {
               />
 
               <button type="submit" disabled={loading}>
-                {loading ? 'Saving...' : 'Save Reading'}
+                {loading
+                  ? 'Please wait...'
+                  : editingId
+                    ? 'Update Reading'
+                    : 'Save Reading'}
               </button>
+
+              {editingId && (
+                <button type="button" className="secondary-button" onClick={clearForm}>
+                  Cancel Edit
+                </button>
+              )}
             </form>
           </div>
 
@@ -349,20 +459,37 @@ function App() {
               <table>
                 <thead>
                   <tr>
-                    <th>Glucose (mg/dL)</th>
+                    <th>Glucose</th>
+                    <th>Slot</th>
                     <th>Date</th>
                     <th>Time</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {readings.map((reading) => (
                     <tr key={reading.id}>
-                      <td>{reading.glucose_level}</td>
+                      <td>{reading.glucose_level} mg/dL</td>
                       <td>
-                        {new Date(reading.measured_at).toLocaleDateString()}
+                        {slots.find((item) => item.value === reading.slot)?.label
+                          || 'Not assigned'}
                       </td>
+                      <td>{new Date(reading.measured_at).toLocaleDateString()}</td>
+                      <td>{new Date(reading.measured_at).toLocaleTimeString()}</td>
                       <td>
-                        {new Date(reading.measured_at).toLocaleTimeString()}
+                        <button
+                          type="button"
+                          onClick={() => editReading(reading)}
+                        >
+                          Edit
+                        </button>
+                        {' '}
+                        <button
+                          type="button"
+                          onClick={() => deleteReading(reading.id)}
+                        >
+                          Delete
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -387,12 +514,16 @@ function App() {
             </form>
 
             {dailyReport && (
-              <div className="report-result">
+              <div>
                 <h4>Report for {dailyReport.date}</h4>
-                <p>Total readings: <strong>{dailyReport.report.total_readings}</strong></p>
-                <p>Average: <strong>{dailyReport.report.average_glucose ?? 'N/A'}</strong></p>
-                <p>Highest: <strong>{dailyReport.report.highest_glucose ?? 'N/A'}</strong></p>
-                <p>Lowest: <strong>{dailyReport.report.lowest_glucose ?? 'N/A'}</strong></p>
+                <ReportSummary report={dailyReport} />
+                {dailyReport.readings?.map((reading) => (
+                  <p key={reading.id}>
+                    {reading.glucose_level} mg/dL —{' '}
+                    {slots.find((item) => item.value === reading.slot)?.label
+                      || 'Not assigned'}
+                  </p>
+                ))}
               </div>
             )}
           </div>
@@ -406,24 +537,18 @@ function App() {
                 min="2000"
                 max="2100"
                 value={month.year}
-                onChange={(e) =>
-                  setMonth({ ...month, year: e.target.value })
-                }
+                onChange={(e) => setMonth({ ...month, year: e.target.value })}
                 required
               />
 
               <label>Month</label>
               <select
                 value={month.month}
-                onChange={(e) =>
-                  setMonth({ ...month, month: e.target.value })
-                }
+                onChange={(e) => setMonth({ ...month, month: e.target.value })}
               >
                 {Array.from({ length: 12 }, (_, index) => (
                   <option key={index + 1} value={index + 1}>
-                    {new Date(2000, index).toLocaleString('en', {
-                      month: 'long'
-                    })}
+                    {new Date(2000, index).toLocaleString('en', { month: 'long' })}
                   </option>
                 ))}
               </select>
@@ -433,26 +558,36 @@ function App() {
 
             {monthlyReport && (
               <div className="report-result">
-                <h4>
-                  {monthlyReport.month}/{monthlyReport.year}
-                </h4>
-                <p>Total readings: <strong>{monthlyReport.report.total_readings}</strong></p>
-                <p>Average: <strong>{monthlyReport.report.average_glucose ?? 'N/A'}</strong></p>
-                <p>Highest: <strong>{monthlyReport.report.highest_glucose ?? 'N/A'}</strong></p>
-                <p>Lowest: <strong>{monthlyReport.report.lowest_glucose ?? 'N/A'}</strong></p>
-
+                <h4>{monthlyReport.month}/{monthlyReport.year}</h4>
+                <ReportSummary report={monthlyReport} />
                 <h4>Daily Breakdown</h4>
-                {monthlyReport.daily_breakdown.length === 0 ? (
-                  <p>No readings for this month.</p>
-                ) : (
+                {monthlyReport.daily_breakdown?.length ? (
                   monthlyReport.daily_breakdown.map((day) => (
                     <p key={String(day.date)}>
                       {String(day.date).slice(0, 10)} — {day.total_readings} readings
                     </p>
                   ))
+                ) : (
+                  <p>No readings for this month.</p>
                 )}
               </div>
             )}
+          </div>
+        </section>
+
+        <section className="dashboard-grid">
+          <div className="panel">
+            <h3>Month-to-Date Report</h3>
+            <p>From the first day of this month until today.</p>
+            <button onClick={getMonthToDate}>Generate Report</button>
+            {rangeReport && <ReportSummary report={rangeReport} />}
+          </div>
+
+          <div className="panel">
+            <h3>Previous Month Report</h3>
+            <p>View readings from the complete previous month.</p>
+            <button onClick={getPreviousMonth}>Generate Report</button>
+            {previousReport && <ReportSummary report={previousReport} />}
           </div>
         </section>
 
